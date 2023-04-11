@@ -1,0 +1,179 @@
+import torch
+import torchvision
+import torchvision.transforms as transforms
+import numpy as np
+import matplotlib.pyplot as plt
+from PIL import Image
+from sklearn.metrics import confusion_matrix, precision_score, recall_score
+import random
+from torch.autograd import Variable
+transform= transforms.Compose([
+  transforms.ToTensor(), # 将图像转换为张量
+  transforms.Normalize((0.1307,), (0.3081,)) # 标准化图像
+])
+
+# 下载并加载MNIST数据集，应用数据转换
+dataset = torchvision.datasets.MNIST(root='./data', download=True, transform=transform)
+list_data=list()
+for i in range(0,60000):
+    list_data.append(list(dataset[i]))
+for i in range(0,60000):
+    list_data[i].append(i)
+# 划分数据集为训练集、验证集和测试集，比例为6:2:2
+trainset, valset,testset =torch.utils.data.random_split(list_data, [36000, 12000, 12000])
+per=0.02   #噪声占比
+#训练集噪声
+noise_index_train=list()
+for i in range(0,int(per*len(trainset))):
+    list_au=[0,1,2,3,4,5,6,7,8,9]
+    list_au.remove(int(trainset[i][1]))
+    trainset[i][1]=int(random.choice(list_au))
+    noise_index_train.append(trainset[i][2])
+#验证集噪声
+noise_index_val=list()
+for i in range(0,int(per*len(valset))):
+    list_au=[0,1,2,3,4,5,6,7,8,9]
+    list_au.remove(int(valset[i][1]))
+    valset[i][1]=int(random.choice(list_au))
+    noise_index_val.append(valset[i][2])
+#测试集噪声
+noise_index_test=list()
+for i in range(0,int(per*len(testset))):
+    list_au=[0,1,2,3,4,5,6,7,8,9]
+    list_au.remove(int(testset[i][1]))
+    testset[i][1]=int(random.choice(list_au))
+    noise_index_test.append(testset[i][2])
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=360,
+                                          shuffle=True, num_workers=0)
+valloader = torch.utils.data.DataLoader(valset, batch_size=120,
+                                         shuffle=True, num_workers=0)
+testloader = torch.utils.data.DataLoader(testset, batch_size=120,
+                                         shuffle=True, num_workers=0)
+trainloader_copy=trainloader
+class LeNet(torch.nn.Module):# 继承 torch 的 Module
+    def __init__(self):
+        super(LeNet, self).__init__()
+        self.conv1 = torch.nn.Conv2d(1, 4, 5)
+        self.relu1 = torch.nn.ReLU()
+        self.pool1 = torch.nn.MaxPool2d(2)
+        self.conv2 = torch.nn.Conv2d(4, 16, 5)
+        self.relu2 = torch.nn.ReLU()
+        self.pool2 = torch.nn.MaxPool2d(2)
+        self.fc1 = torch.nn.Linear(16 * 4 * 4, 120)
+        self.relu3 = torch.nn.ReLU()
+        self.fc2 = torch.nn.Linear(120, 84)
+        self.relu4 = torch.nn.ReLU()
+        self.fc3 = torch.nn.Linear(84, 10)
+
+    def forward(self, x):
+        x = self.pool1(self.relu1(self.conv1(x)))
+        x = self.pool2(self.relu2(self.conv2(x)))
+        x = x.view(-1, 16 * 4 * 4)
+        x = self.relu3(self.fc1(x))
+        x = self.relu4(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
+# 创建LeNet模型并移动到设备（CPU或GPU）
+model = LeNet()
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+model.to(device)
+# 定义损失函数和优化器
+criterion = torch.nn.CrossEntropyLoss()#计算交叉熵
+#weight_params = [param for name, param in model.named_parameters() if "bias" not in name]
+#bias_params = [param for name, param in model.named_parameters() if "bias" in name]
+optimizer = torch.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+#optimizer = torch.optim.SGD([{'params': weight_params, 'weight_decay':1e-5},
+                             #{'params': bias_params, 'weight_decay':0}],
+                            #lr=1e-2, momentum=0.9)
+#记录预测错误样本的索引
+def wrong_sample(predicted,labels,index):
+    for i in range(0,int(len(trainloader.dataset)/len(trainloader))):
+        if(int(predicted[i])!=labels[i]):
+            train_wrong_index_list.append(int(index[i]))        
+#到达一定迭代次数后更新训练集
+def refresh_train(predicted,index,trainloader_copy):
+    j=0
+    for i in range(int(len(trainloader_copy.dataset))):
+        if trainloader_copy.dataset[i][2]==train_wrong_index_list[j]:
+            trainloader_copy.dataset[i][1]=predicted[j]
+            j=j+1
+    return trainloader_copy
+def refresh_train(predicted,trainloader_copy):
+    j=0
+    for i in range(0,len(trainloader_copy.dataset)):
+        if len(train_wrong_index_list)!=0:
+            if trainloader_copy.dataset[i][2]==train_wrong_index_list[j]:
+                trainloader_copy.dataset[i][1]=predicted[j]
+                j=j+1
+    return trainloader_copy
+#噪声识别正确率输出函数
+def noisy_acc(train_wrong_index_list,noise_index_train):
+    sum=0
+    for i in train_wrong_index_list:
+        if i in noise_index_train:
+            sum+=1
+    pre_noisy_train_R=sum/len(noise_index_train)
+    pre_noisy_train_P=sum/len(train_wrong_index_list)
+    train_accs_R.append(pre_noisy_train_R)
+    train_accs_P.append(pre_noisy_train_P)
+    train_F1=2*pre_noisy_train_P*pre_noisy_train_R/(pre_noisy_train_P+pre_noisy_train_R)
+    train_F1s.append(train_F1)
+    print('[%d]训练集：识别出的噪声样本个数为:%.3f, 的确在噪声集的个数为:%.3f ,查准率为:%.3f，查全率为:%.3f,F1为:%.3f'% 
+         (epoch+1,len(train_wrong_index_list),sum, pre_noisy_train_P,pre_noisy_train_R,train_F1))
+def evaluate(model, valloader,noise_index_val):
+    val_wrong_index_list=list()
+    with torch.no_grad(): # 不计算梯度
+        for data in valloader: # 遍历验证数据集
+            inputs, labels,index = data # 获取输入和标签
+            inputs = inputs.to(device) # 移动输入到设备
+            labels = labels.to(device) # 移动标签到设备
+            outputs = model(inputs) # 前向传播
+            _, predicted = torch.max(outputs.data, 1) # 获取最大概率的预测
+            for i in range(0,int(len(valloader.dataset)/len(valloader))):
+                if(int(predicted[i])!=labels[i]):
+                    val_wrong_index_list.append(int(index[i]))
+    sum=0
+    for i in val_wrong_index_list:
+        if i in noise_index_val:
+            sum+=1
+    pre_noisy_val_R=sum/len(noise_index_val)
+    pre_noisy_val_P=sum/len(val_wrong_index_list)
+    val_F1=2*pre_noisy_val_R*pre_noisy_val_P/(pre_noisy_val_P+pre_noisy_val_R)
+    val_accs_R.append(pre_noisy_val_R)
+    val_accs_P.append(pre_noisy_val_P)
+    val_F1s.append(val_F1)
+    print('验证集：识别出的噪声样本个数为:%.3f,的确在噪声集的个数为:%.3f ,查准率为:%.3f,查全率为:%.3f,F1为:%.3f '%
+         (len(val_wrong_index_list),sum, pre_noisy_val_P,pre_noisy_val_R,val_F1))
+# 训练模型，并记录训练集和验证集上的损失和准确率，用于可视化
+train_accs_R = [] # 记录训练集上的准确率
+val_accs_R = [] # 记录验证集上的准确率
+train_accs_P = [] # 记录训练集上的准确率
+val_accs_P = [] # 记录验证集上的准确率
+train_F1s=[]
+val_F1s=[]
+for epoch in range(30): # 迭代30个周期
+
+    train_wrong_index_list=list()
+
+    for data in trainloader_copy: # 遍历训练数据集
+        inputs, labels,index = data # 获取输入和标签
+        inputs = inputs.to(device) # 移动输入到设备
+        labels = labels.to(device) # 移动标签到设备
+
+        optimizer.zero_grad() # 清零梯度
+        outputs = model(inputs) # 前向传播
+        loss = criterion(outputs, labels) # 计算损失
+        loss.backward() # 反向传播
+        optimizer.step() # 更新参数
+
+        _, predicted = torch.max(outputs.data, 1)# 获取最大概率的预测
+        wrong_sample(predicted,labels,index)
+        if epoch in range(3,30,4):
+            trainloader_copy=refresh_train(predicted,trainloader_copy)
+    if epoch in range(6,30,7):
+        trainloader_copy=trainloader
+    noisy_acc(train_wrong_index_list,noise_index_train)
+    evaluate(model, valloader,noise_index_val) # 计算验证集上的损失和准确率
+
+print('Finished Training')
